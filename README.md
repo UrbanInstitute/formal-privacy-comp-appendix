@@ -46,6 +46,8 @@ The programs rely on R packages from CRAN and GitHub, and Python packages from P
 
 ## License
 
+GNU GPL-v3
+
 ## Contact
 
 Please contact [Aaron R. Williams](awilliams@urban.org) with questions. 
