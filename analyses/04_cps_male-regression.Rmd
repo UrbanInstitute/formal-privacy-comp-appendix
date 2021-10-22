@@ -1,0 +1,869 @@
+---
+title: "The Causal Effect of Education on Earnings"
+author: "Aaron R. Williams"
+output: 
+  html_document:
+    code_folding: hide    
+    toc: TRUE
+    toc_depth: 3
+    toc_float: TRUE
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(fig.width = 10)
+
+options(scipen = 999)
+
+```
+
+```{css echo=FALSE}
+h1 {
+    font-size: 34px;
+    color: #337AB7;
+}
+
+p {
+    margin: 20px 0 20px;
+}
+
+```
+
+The SOI PUF is useful because it contains detailed information on many important tax variables. The March Supplement in the Current Population Survey contains some useful income and tax variables but not enough to support two considered regression applications.
+
+1. It was impossible to recreate *The Effects of Taxation on the Selling of Corporate Stock and The Realization of Capital Gains* by Martin Feldstein, Joel Slemrod, and Shlomo Yitzhaki because the CPS never contained dividends and only contained capital gains as recently as 2008. There are complex ways around this but the researcher degrees of freedom do not seem warranted. 
+2. It was impossible to recreate *The Income Tax and Charitable Contributions* by Martin Feldstein and Amy Taylor. While the methods are simple, the CPS does not contain information about charitable contributions. 
+
+Instead, we borrow a cross-sectional multiple linear regressions from *[The Causal Effect of Education on Earnings](https://eml.berkeley.edu/~card/papers/causal_educ_earnings.pdf)* by David Card. These models are not causal and have been replaced by more sophisticated methods that generally report smaller effect sizes for the returns to education, but they are indicative of early quantitative publications on this topic. We reproduce Table 1 on page 1809. 
+
+# Prepare Data
+
+```{r}
+library(ipumsr)
+library(srvyr)
+library(stargazer)
+library(tidyverse)
+library(gt)
+library(broom)
+library(yardstick)
+library(DT)
+
+theme_set(theme_minimal())
+theme_update(plot.title.position = "plot")
+
+```
+
+```{r}
+ddi <- read_ipums_ddi(here::here("data", "cps_00013.xml"))
+asec <- read_ipums_micro(ddi)
+
+# remove labels
+asec <- asec %>%
+  mutate(
+    MONTH = as_factor(lbl_clean(MONTH)),
+    AGE = as.numeric(lbl_clean(AGE)),
+    SEX = as_factor(lbl_clean(SEX)),
+    RACE = as_factor(lbl_clean(RACE)),
+    #EDUC = as_factor(lbl_clean(EDUC)),
+    UHRSWORKLY = as.numeric(lbl_clean(lbl_na_if(UHRSWORKLY, ~.val == 999))),
+    INCWAGE = if_else(condition = as.numeric(lbl_clean(INCWAGE)) == 99999999, 
+                      true = as.numeric(NA),
+                      false = as.numeric(lbl_clean(INCWAGE)))
+  )
+
+```
+
+## Construct variables
+
+We need several new variables for this analysis:
+
+* Convert salaries and wages into 1995 dollars
+* Construct years of education
+* Construct potential experience
+* Construct hourly wage
+
+To convert salaries and wages into 1995 dollars, we adjust salaries and wages in 1994 and 1996 with the CPI-U from the Bureau of Labor Statistics. Data were accessed through [FRED](https://fred.stlouisfed.org/series/CPIAUCSL) and are available in data/CPIAUSCL.csv.
+
+```{r}
+asec <- asec %>%
+  mutate(
+    INCWAGE95 = case_when(
+      YEAR == 1994 ~ INCWAGE * (151.2 / 147.1),
+      YEAR == 1995 ~ INCWAGE,
+      YEAR == 1996 ~ INCWAGE * (151.2 / 155.5)
+    )
+  )
+
+```
+
+The Census Bureau switch from highest year or grade to highest level of education in the early 1990s. The February 1990 CPS contains two questions that can be used to create a crosswalk. 
+
+```{r}
+ddi_educ <- read_ipums_ddi(here::here("data", "cps_00012.xml"))
+educ <- read_ipums_micro(ddi_educ)
+
+educ <- educ %>%
+  select(YEAR, WTFINL, AGE, EDUC, HIGRADE)
+
+
+# 1. map Feb 1990 to ASEC 94 (EDUC)
+educ <- educ %>%
+  mutate(
+    cats = case_when(
+      EDUC ==   1 ~   1,
+      EDUC ==   2 ~   2,
+      EDUC ==  11 ~  10, # grade 1 to grades 1-4
+      EDUC ==  12 ~  10, # grade 1 to grades 1-4
+      EDUC ==  13 ~  10, # grade 1 to grades 1-4
+      EDUC ==  14 ~  10,
+      EDUC ==  21 ~  20, # grade 5 to grades 5-6
+      EDUC ==  22 ~  20, # grade 5 to grades 5-6
+      EDUC ==  31 ~  30,
+      EDUC ==  32 ~  30,
+      EDUC ==  40 ~  40,
+      EDUC ==  50 ~  50,
+      EDUC ==  60 ~  60,
+      EDUC ==  72 ~  71, # 
+      EDUC ==  73 ~  73,
+      EDUC ==  80 ~  81,
+      EDUC ==  90 ~  91,
+      EDUC == 100 ~  92,
+      EDUC == 110 ~ 111,
+      EDUC == 121 ~ 122,
+      EDUC == 122 ~ 122,
+      EDUC == 123 ~ 122,
+      EDUC == 124 ~ 122,
+      EDUC == 125 ~ 122
+    )
+  ) 
+
+educ <- educ %>%
+  mutate(
+    years_of_educ = case_when(
+      HIGRADE ==  0 ~ 0,
+      HIGRADE ==  2 ~ 0,
+      HIGRADE <  50 ~ 1,
+      HIGRADE <  60 ~ 2,
+      HIGRADE <  70 ~ 3,
+      HIGRADE <  80 ~ 4,
+      HIGRADE <  90 ~ 5,
+      HIGRADE < 100 ~ 6,
+      HIGRADE < 110 ~ 7,
+      HIGRADE < 120 ~ 8,
+      HIGRADE < 130 ~ 9,
+      HIGRADE < 140 ~ 10,
+      HIGRADE < 150 ~ 11,
+      HIGRADE < 160 ~ 12,
+      HIGRADE < 170 ~ 13,
+      HIGRADE < 180 ~ 14,
+      HIGRADE < 190 ~ 15,
+      HIGRADE < 200 ~ 16,
+      HIGRADE < 210 ~ 17,
+      HIGRADE == 210 ~ 18,
+      TRUE ~ as.numeric(NA)
+    )
+  )
+
+
+# create lookup table to apply to 1994-1996 ASEC
+# lookup_table <- educ %>%
+#   filter(AGE >= 15) %>%
+#   group_by(cats) %>%
+#   summarize(years_of_educ = weighted.mean(x = years_of_educ, w = WTFINL))
+
+# use library(srvyr) to account for the survey design before calculating the 
+# weighted mean
+educ_design_survey <- educ %>%
+  select(-EDUC, -HIGRADE) %>%
+  mutate(fpc = sum(WTFINL)) %>%
+  as_survey_design(ids = 1, fpc = fpc, weights = WTFINL)
+
+lookup_table <- educ_design_survey %>%
+  filter(AGE >= 15) %>%  
+  group_by(cats) %>%
+  summarize(years_of_educ = survey_mean(years_of_educ, vartype = "ci")) %>%
+  select(cats, years_of_educ)
+
+```
+
+The mapping from highest year or grade to highest level of school isn't perfect right now. We don't have detailed information for MA, PhD, and MD/JD. We collapse all of these highest degrees into one category, which may explain some small difference in our results. 
+
+```{r}
+asec <- asec %>%
+  mutate(EDUC = ifelse(EDUC %in% c(123, 124, 125), 122, EDUC)) %>%
+  left_join(lookup_table, by = c("EDUC" = "cats"))
+
+```
+
+We calculate Mincer's "potential experience", whcih is age minus the years of education minus 6. The calculation included in the paper results in negative numbers for very young workers. We elected to set the minimum to 0. 
+
+```{r}
+asec <- asec %>%
+  mutate(potential_experience = pmax(0, AGE - years_of_educ - 6))
+
+```
+
+We construct a measure of hourly wages using an equation on page 1808
+
+Annual earnings = Hourly Earnings X Hours/Week X Weeks
+
+```{r}
+asec <- asec %>%
+  mutate(hourly_wage = case_when(
+    INCWAGE95 == 0 ~ 0,
+    TRUE ~ INCWAGE95 / (WKSWORK1 * UHRSWORKLY)
+    )
+  )
+
+```
+
+Finally, we construct a dummy variable for "non-white". This specification and verbage is a little antiquated, but we include it for comparisons. 
+
+```{r}
+asec <- asec %>%
+  mutate(non_white = as.numeric(!RACE == "White"))
+
+```
+
+## Filter to population of interest
+
+We are interested in cases ages 16-66, with hourly wages between \$2 and \$150, with positive salaries and wages. Our n for male and female are slightly off from the results in the published paper. 
+
+We create data sets for men and women.
+
+```{r}
+asec_subset <- asec %>%
+  filter(
+    AGE >= 16,
+    AGE <= 66
+  ) %>%
+  filter(
+    hourly_wage > 2,
+    hourly_wage < 150
+  ) %>%
+  filter(INCWAGE > 0)
+
+asec_subset_male <- asec_subset %>%
+  filter(SEX == "Male")
+
+```
+
+# Results Without Noise
+
+```{r}
+# run model (5) for men
+model5_male <- lm(log(INCWAGE) ~ years_of_educ + poly(potential_experience, degree = 3, raw = TRUE) + non_white, data = asec_subset_male)
+
+```
+
+```{r results = "asis"}
+stargazer(model5_male, type = "html", title = "Model (5) Male")
+
+```
+
+# Noisy Results
+
+Our tests generated thousands of results and the problem is highly multi-dimensional with multiple methods, multiple tuning parameters, multiple coefficients, and multiple metrics. Our strategy is
+
+* Look at one value of Epsilon and Delta
+  * Look at the medians for metrics for a sense of the "average result"
+  * Look at deciles for metrics for a sense of the spread of results
+* Look at results across values of Epsilon and Delta
+
+We focus on six metrics
+
+1. Relative bias
+2. Confidence Interval Overlap
+3. Relative Confidence Interval Length
+4. Proportion with matched signs
+5. Proportion with matched significance
+6. Relative RMSE
+
+
+
+```{r}
+coefficients <- tidy(model5_male, conf.int = TRUE) %>%
+  mutate(
+    ci_length = conf.high - conf.low,
+    ci_contains_zero = conf.high > 0 & conf.low < 0
+  ) %>%
+  mutate(term = 
+           recode(
+             term,
+             `poly(potential_experience, degree = 3, raw = TRUE)1` = "potential_experience",
+             `poly(potential_experience, degree = 3, raw = TRUE)2` = "potential_experience_squared",
+             `poly(potential_experience, degree = 3, raw = TRUE)3` = "potential_experience_cubed",
+             `non_white` = "non_white1"
+           )
+  )
+
+coefficients_bootstrap <- read_csv(here::here("results", "04_cps_male-regression_coefficient_asymptotic.csv"), 
+                                    col_types = cols(
+                                      method = col_character(),
+                                      epsilon = col_double(),
+                                      replicate = col_double(),
+                                      term = col_character(),
+                                      estimate_results = col_double(),
+                                      estimate_noisy_results = col_double(),
+                                      bias = col_double(),
+                                      ci_overlap = col_double(),
+                                      ci_length = col_double(),
+                                      sign_match = col_logical(),
+                                      ci_contains_zero = col_logical(),
+                                      delta = col_double(),
+                                      n = col_double()
+                                    )) %>%
+  mutate(method = if_else(method == "Brawner and Hanaker Method", "BHM", method)) %>%
+  mutate(method = if_else(!is.na(n), paste0(method, " (n = ", n, ")"), method)) 
+
+coefficients_bootstrap <- read_csv(here::here("results", "04_cps_male-regression_coefficient_bootstrap.csv"), 
+                                   col_types = cols(
+                                     method = col_character(),
+                                     epsilon = col_double(),
+                                     replicate = col_double(),
+                                     term = col_character(),
+                                     estimate_results = col_double(),
+                                     estimate_noisy_results = col_double(),
+                                     bias = col_double(),
+                                     ci_overlap = col_double(),
+                                     ci_length = col_double(),
+                                     sign_match = col_logical(),
+                                     ci_contains_zero = col_logical(),
+                                     delta = col_double(),
+                                     n = col_double()
+                                   )) %>%
+  mutate(method = if_else(method == "Brawner and Hanaker Method", "BHM", method)) %>%
+  mutate(method = if_else(!is.na(n), paste0(method, " (n = ", n, ")"), method)) 
+
+true_rmse <- asec_subset_male %>%
+  mutate(log_incwage = log(INCWAGE)) %>%
+  modelr::add_predictions(model5_male) %>%
+  rmse(truth = log_incwage, estimate = pred) %>%
+  pull(.estimate)
+
+rmse_asymptotic <- read_csv(here::here("results", "04_cps_male-regression_rmse_asymptotic.csv"),
+         col_types = cols(
+           method = col_character(),
+           epsilon = col_double(),
+           replicate = col_double(),
+           rmse = col_double(),
+           delta = col_double(),
+           n = col_double()
+         )
+) %>%
+  mutate(method = if_else(method == "Brawner and Hanaker Method", "BHM", method)) %>%
+  mutate(method = if_else(!is.na(n), paste0(method, " (n = ", n, ")"), method)) 
+
+rmse_bootstrap <- read_csv(here::here("results", "04_cps_male-regression_rmse_bootstrap.csv"),
+                           col_types = cols(
+                             method = col_character(),
+                             epsilon = col_double(),
+                             replicate = col_double(),
+                             rmse = col_double(),
+                             delta = col_double(),
+                             n = col_double()
+                           )) %>%
+  mutate(method = if_else(method == "Brawner and Hanaker Method", "BHM", method)) %>%
+  mutate(method = if_else(!is.na(n), paste0(method, " (n = ", n, ")"), method)) 
+
+```
+
+```{r}
+coefficients_bootstrap_summary <- coefficients_bootstrap %>%
+  left_join(
+    coefficients,
+    by = "term",
+    suffix = c("_noisy", "_original")
+  ) %>%
+  group_by(method, epsilon, term, delta, n) %>%
+  summarize(
+    `Median bias` = median(bias),
+    `Median Relative Bias` = median(bias / estimate_results),
+    `Median CI Overlap` = median(ci_overlap),
+    `Median Relative CI Length` = median(ci_length_noisy / ci_length_original),
+    `Prop Sign Match` = mean(sign_match),
+    `Prop. Sig. Match` = mean(ci_contains_zero_original == ci_contains_zero_noisy)
+  ) %>%
+  ungroup()
+
+```
+
+## Summary Table
+
+This table summarizes the results across all methods for regression. Detailed data visualizations are in subsequent sections.
+
+```{r}
+coefficients_bootstrap_summary %>%
+  mutate(
+    `Median Relative Bias` = round(`Median Relative Bias`, digits = 3),
+    `Median CI Overlap` = round(`Median CI Overlap`, digits = 3),
+    `Median Relative CI Length` = round(`Median Relative CI Length`, digits = 3)
+  ) %>%
+  datatable()
+
+```
+
+## Compare Methods with $\epsilon = 5$ and $\delta = 0.000001$
+
+```{r}
+eps5 <- coefficients_bootstrap %>%
+  left_join(
+    coefficients,
+    by = "term",
+    suffix = c("_noisy", "_original")
+  ) %>%
+  filter(epsilon == 5, delta %in% c(NA, 0.000001))
+
+eps5 <- eps5 %>%
+  mutate(
+    relative_bias = bias / estimate_results,
+    relative_ci_length = ci_length_noisy / ci_length_original
+  )
+
+probs <- seq(0.1, 0.9, 0.1)
+
+eps5_summary <- eps5 %>%
+  group_by(method, term) %>%
+  summarize(
+    n(), 
+    q = probs,
+    bias = quantile(bias, probs = probs),
+    relative_bias = quantile(relative_bias, probs = probs),
+    ci_overlap = quantile(ci_overlap, probs = probs),
+    relative_ci_length = quantile(relative_ci_length, probs = probs)
+  ) 
+
+rmse_bootstrap_summary <- rmse_bootstrap %>%
+  group_by(method, epsilon, delta, n) %>%
+  summarize(
+    q = probs,
+    relative_rmse = quantile(rmse / true_rmse, probs = probs)
+  ) %>%
+  ungroup()
+
+```
+
+### Bias {.tabset}
+
+#### Median
+
+```{r}
+eps5_summary %>%
+  filter(q == 0.5) %>%
+  ggplot(aes(bias, method)) +
+  geom_point() +
+  geom_vline(xintercept = 0, color = "red") +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Median Bias with Epsilon == 5 and Delta == 0.000001",
+    y = NULL
+  )
+
+```
+
+#### Deciles
+
+```{r}
+eps5_summary %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%
+  ggplot(aes(bias, method)) +
+  geom_vline(xintercept = 0, color = "red") +  
+  geom_point(alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Bias with Epsilon == 5 and Delta == 0.000001",
+    subtitle = "Deciles", 
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+#### Violin Plots
+
+```{r}
+eps5 %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  ggplot(aes(bias, method)) +
+  geom_vline(xintercept = 0, color = "red") + 
+  geom_violin(draw_quantiles = 0.5, alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Bias with Epsilon == 5 and Delta == 0.000001",
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+### Relative Bias {.tabset}
+
+#### Median
+
+```{r}
+eps5_summary %>%
+  filter(q == 0.5) %>%
+  ggplot(aes(relative_bias, method)) +
+  geom_point() +
+  geom_vline(xintercept = 0, color = "red") +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Median Relative Bias with Epsilon == 5 and Delta == 0.000001",
+    y = NULL
+  )
+
+```
+
+#### Deciles
+
+```{r}
+eps5_summary %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%
+  ggplot(aes(relative_bias, method)) +
+  geom_vline(xintercept = 0, color = "red") +  
+  geom_point(alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Relative Bias with Epsilon == 5 and Delta == 0.000001",
+    subtitle = "Deciles", 
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+#### Violin plots
+
+```{r}
+eps5 %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  ggplot(aes(relative_bias, method)) +
+  geom_vline(xintercept = 0, color = "red") + 
+  geom_violin(draw_quantiles = 0.5, alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Relative Bias with Epsilon == 5 and Delta == 0.000001",
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+### CI Overlap {.tabset}
+
+#### Median
+
+```{r}
+eps5_summary %>%
+  filter(q == 0.5) %>%  
+  ggplot(aes(ci_overlap, method)) +
+  geom_point() +
+  geom_vline(xintercept = 1, color = "red") +  
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Median CI Overlap with Epsilon == 5 and Delta == 0.000001",
+    y = NULL
+  )
+
+```
+
+#### Deciles
+
+```{r}
+eps5_summary %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  ggplot(aes(ci_overlap, method)) +
+  geom_vline(xintercept = 1, color = "red") +  
+  geom_point(alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "CI Overlap with Epsilon == 5 and Delta == 0.000001",
+    subtitle = "Deciles",   
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+#### Violin plots
+
+```{r}
+eps5 %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  ggplot(aes(ci_overlap, method)) +
+  geom_vline(xintercept = 1, color = "red") + 
+  geom_violin(draw_quantiles = 0.5, alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "CI Overlap with Epsilon == 5 and Delta == 0.000001",
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+### Relative CI Length {.tabset}
+
+#### Median
+
+```{r}
+eps5_summary %>%
+  filter(q == 0.5) %>%    
+  ggplot(aes(relative_ci_length, method)) +
+  geom_point() +
+  geom_vline(xintercept = 1, color = "red") +    
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Median Relative CI Length with Epsilon == 5 and Delta == 0.000001",
+    y = NULL
+  )
+
+```
+
+#### Deciles
+
+```{r}
+eps5_summary %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  ggplot(aes(relative_ci_length, method)) +
+  geom_vline(xintercept = 1, color = "red") +  
+  geom_point(alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Relative CI Length with Epsilon == 5 and Delta == 0.000001",
+    subtitle = "Deciles", 
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+#### Violin plots
+
+```{r}
+eps5 %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  ggplot(aes(relative_ci_length, method)) +
+  geom_vline(xintercept = 1, color = "red") + 
+  geom_violin(draw_quantiles = 0.5, alpha = 0.2) +
+  facet_wrap(~term, scales = "free_x") +
+  labs(
+    title = "Relative CI Length with Epsilon == 5 and Delta == 0.000001",
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+### Sign Match {.tabset}
+
+#### Proportion
+
+```{r}
+eps5 %>%
+  group_by(term, method, n) %>%
+  summarize(prop_sign_match = mean(sign_match)) %>%
+  ggplot(aes(prop_sign_match, method)) +
+  geom_col(position = "dodge") +
+  geom_vline(xintercept = 1, color = "red") +  
+  facet_wrap(~term) +
+  labs(
+    title = "Sign Match with Epsilon == 5 and Delta == 0.000001",
+    y = NULL
+  )
+
+```
+
+### Significance Match {.tabset}
+
+#### Proportion
+
+```{r}
+eps5 %>%
+  group_by(term, method, n) %>%
+  summarize(prop_sig_match = mean(ci_contains_zero_original == ci_contains_zero_noisy)) %>%
+  ggplot(aes(prop_sig_match, method)) +
+  geom_col(position = "dodge") +
+  geom_vline(xintercept = 1, color = "red") +  
+  facet_wrap(~term) +
+  labs(
+    title = "Significance Match with Epsilon == 5 and Delta == 0.000001",
+    y = NULL
+  )
+
+```
+
+### Relative RMSE {.tabset}
+
+#### Median
+
+```{r}
+rmse_bootstrap_summary %>%
+  filter(q == 0.5) %>%
+  filter(epsilon == 5, delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(relative_rmse, method)) +
+  geom_point() +
+  geom_vline(xintercept = 1, color = "red") +
+  labs(
+    title = "Median Relative RMSE with Epsilon == 5 and Delta == 0.000001",
+    y = NULL    
+  )
+
+```
+
+#### Deciles
+
+```{r}
+rmse_bootstrap_summary %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%
+  filter(epsilon == 5, delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(relative_rmse, method)) +
+  geom_point(alpha = 0.2) +
+  geom_vline(xintercept = 1, color = "red") +
+  labs(
+    title = "Relative RMSE with Epsilon == 5 and Delta == 0.000001",
+    subtitle = "Deciles",
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+#### Violin plots
+
+```{r}
+rmse_bootstrap %>%
+  filter(!method %in% c("BHM (n = 10)", "BHM (n = 25)")) %>%  
+  mutate(relative_rmse = rmse / true_rmse) %>%
+  ggplot(aes(relative_rmse, method)) +
+  geom_vline(xintercept = 1, color = "red") +
+  geom_violin(draw_quantiles = 0.5) +
+  labs(
+    title = "Relative RMSE with Epsilon == 5 and Delta == 0.000001",
+    y = NULL,
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+## Across Values of Epsilon
+
+```{r}
+coefficients_bootstrap_summary %>%
+  filter(
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001),
+    !method %in% c("BHM (n = 10)", "BHM (n = 25)")
+  ) %>%
+  ggplot(aes(epsilon, `Median bias`)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +  
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~term, scales = "free_y") +
+  labs(
+    title = "Median Bias with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+coefficients_bootstrap_summary %>%
+  filter(
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001),
+    !method %in% c("BHM (n = 10)", "BHM (n = 25)")
+  ) %>%
+  ggplot(aes(epsilon, `Median Relative Bias`)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +  
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~term, scales = "free_y") +
+  labs(
+    title = "Median Relative Bias with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+coefficients_bootstrap_summary %>%
+  filter(
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001),
+    !method %in% c("BHM (n = 10)", "BHM (n = 25)")
+  ) %>%
+  ggplot(aes(x = epsilon, y = `Median CI Overlap`)) +
+  geom_hline(yintercept = 1, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +  
+  geom_point(aes(color = method), alpha = 0.4) + 
+  facet_wrap(~term, scales = "free_y") +
+  labs(
+    title = "Median CI Overlap with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+coefficients_bootstrap_summary %>%
+  filter(
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001),
+    !method %in% c("BHM (n = 10)", "BHM (n = 25)")
+  ) %>%
+  ggplot(aes(x = epsilon, y = `Median Relative CI Length`)) +
+  geom_hline(yintercept = 1, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +  
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~term, scales = "free_y") +
+  labs(
+    title = "Median Relative CI Length with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+coefficients_bootstrap_summary %>%
+  filter(
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001)
+  ) %>%
+  ggplot(aes(`Prop Sign Match`, method, fill = factor(epsilon))) +
+  geom_col(position = "dodge") +
+  geom_vline(xintercept = 1, color = "red") +
+  facet_wrap(~term) +
+  labs(
+    title = "Proportion Sign Match with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+coefficients_bootstrap_summary %>%
+  filter(
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001)
+  ) %>%
+  ggplot(aes(`Prop. Sig. Match`, method, fill = factor(epsilon))) +
+  geom_col(position = "dodge") +
+  geom_vline(xintercept = 1, color = "red") +  
+  facet_wrap(~term) +
+  labs(
+    title = "Proportion Significance Match with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+# RMSE
+rmse_bootstrap_summary %>%
+  filter(
+    q == 0.5,
+    epsilon < 100, 
+    delta %in% c(NA, 0.000001)
+  ) %>%
+  ggplot(aes(epsilon, relative_rmse)) +
+  geom_hline(yintercept = 1, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +  
+  geom_point(aes(color = method), alpha = 0.4) + 
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "Relative RMSE with Delta == 0.000001",
+    caption = "BHM dropped for clarity"
+  )
+
+```
+
+# References
+
+* Card, David, 1999. "The Causal Effect of Education on Earnings." Handbook of Labor Economics, Volume 3. 

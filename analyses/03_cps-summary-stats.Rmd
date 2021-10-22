@@ -1,0 +1,566 @@
+---
+title: "CPS Summary Statistics"
+author: "Aaron R. Williams"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 2
+    toc_float: TRUE
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(fig.width = 10)
+
+```
+
+```{css echo=FALSE}
+h1 {
+    font-size: 34px;
+    color: #337AB7;
+}
+
+p {
+    margin: 20px 0 20px;
+}
+
+```
+
+# Preprocessing
+
+```{r}
+library(Hmisc)
+library(tidyverse)
+library(ipumsr)
+library(reticulate)
+library(janitor)
+library(gt)
+library(DT)
+
+theme_set(theme_minimal())
+theme_update(plot.title.position = "plot")
+
+options(scipen = 999)
+
+```
+
+This codes loads the data from [IPUMS CPS](https://cps.ipums.org/cps/).
+
+```{r}
+ddi <- read_ipums_ddi(here::here("data", "cps_00008.xml"))
+data <- read_ipums_micro(ddi)
+
+```
+
+# Counts
+
+## No Noise
+
+We reduce our sample to just heads of households and spouses.
+
+```{r}
+asec <- data %>%
+  filter(ASECFLAG == 1) %>%
+  filter(RELATE %in% c("101", "201"))
+
+```
+
+We count the unweighted and weighted observations.
+
+```{r}
+# unweighted observations
+nrow(asec)
+
+# weighted observations
+sum(asec$ASECWT)
+
+```
+
+# Histograms
+
+## No Noise -- Mortenson Figure 1
+
+The Mortenson paper does not work with the CPS data because the data are rounded and imprecise. Still, we calculate a histogram for demonstration using five years of pooled CPS ASEC data.
+
+```{r}
+ddi <- read_ipums_ddi(here::here("data", "cps_00009.xml"))
+cps_mort <- read_ipums_micro(ddi)
+
+```
+
+1. Load the CPS ASEC
+2. Filter to where NCHILD == 2
+3. Filter to where FILESTAT %in% c(4, 5)
+4. Filter to drop dependents
+5. Sum `INCWAGE`, `INCBUS`, and `INCFARM` to create earned income. 
+6. Inflation adjust all years into 2014 dollars
+
+```{r}
+count(cps_mort, NCHILD)
+
+eitc <- cps_mort %>%
+  # limit to households with two children
+  filter(NCHILD == 2) %>%
+  # limit to single and head of household filers
+  filter(FILESTAT %in% c(4, 5)) %>%
+  # drop dependents
+  filter(DEPSTAT == 0)
+
+# calculate earned income
+eitc <- eitc %>%
+  mutate(
+    earned_income = 
+      INCWAGE +
+      INCBUS +
+      INCFARM
+  )
+
+# inflation adjust to 2014 dollars
+eitc <- eitc %>%
+  mutate(
+    earned_income_2014 =
+      case_when(
+        YEAR == 2010 ~ earned_income * 236.715 / 218.076166666666,
+        YEAR == 2011 ~ earned_income * 236.715 / 224.923,
+        YEAR == 2012 ~ earned_income * 236.715 / 229.586083333333, 
+        YEAR == 2013 ~ earned_income * 236.715 / 232.95175,
+        YEAR == 2014 ~ earned_income
+      )
+  ) %>%
+  select(earned_income, earned_income_2014)
+
+eitc %>%
+  filter(
+    earned_income_2014 > 0,
+    earned_income_2014 <= 30000
+  ) %>%
+  ggplot(aes(earned_income_2014)) +
+  geom_histogram(binwidth = 1000) +
+  scale_x_continuous(labels = scales::dollar) +
+  labs(title = "Earned Income for Single/HOH Filers with 2 Child Dependents")
+
+```
+
+```{r}
+source(here::here("R", "prep_cps03.R"))
+
+mortenson_cps <- prep_cps03()
+
+# values for specifications
+breaks <- seq(from = 0, to = 30000, by = 1000)
+
+# no noise ----------------------------------------------------------------
+true_histogram <- hist(mortenson_cps$earned_income_2014, breaks = breaks, plot = FALSE)$counts
+
+```
+
+## Noisy Results
+
+This table summarizes the results across all methods for histograms. Detailed data visualizations are in subsequent sections. 
+
+```{r}
+histogram_results <- read_csv(here::here("results", "03_cps_histograms.csv"), guess_max = 36000)
+
+histogram_results <- histogram_results %>%
+  mutate(
+    relative_bias = bias /  mean(true_histogram)
+  )
+
+probs <- seq(0.1, 0.9, 0.1)
+
+histogram_results_summary <- histogram_results %>%
+  group_by(method, epsilon, delta) %>%
+  summarize(
+    q = probs, 
+    relative_bias = quantile(relative_bias, probs = probs),
+    bias = quantile(bias, probs = probs),
+    rmse = quantile(rmse, probs = probs)
+  ) %>%
+  ungroup()
+
+histogram_results_summary %>%
+  filter(q == 0.5) %>%
+  datatable()
+
+```
+
+
+```{r}
+histogram_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(q == 0.5,
+         delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(epsilon, relative_bias)) +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "Median Relative Bias for Income Histogram"
+  )
+
+histogram_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         q %in% c(0.1, 0.5, 0.9)) %>%
+  ggplot(aes(factor(epsilon), relative_bias)) +
+  geom_line(aes(group = factor(q)), alpha = 0.2) +
+  geom_point(aes(color = factor(q)), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "Relative Bias for Income Histogram",
+    subtitle = "Selected percentiles"
+  )
+
+histogram_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(q == 0.5,
+         delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(epsilon, bias)) +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "Median Bias for Income Histogram"
+  )
+
+histogram_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         q %in% c(0.1, 0.5, 0.9)) %>%
+  ggplot(aes(factor(epsilon), bias)) +
+  geom_line(aes(group = factor(q)), alpha = 0.2) +
+  geom_point(aes(color = factor(q)), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "Bias for Income Histogram",
+    subtitle = "Selected Percentiles"
+  )
+
+histogram_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(q == 0.5,
+         delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(epsilon, rmse)) +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method) +
+  labs(
+    title = "Median RMSE for Income Histogram"
+  )
+
+histogram_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         q %in% c(0.1, 0.5, 0.9)) %>%
+  ggplot(aes(factor(epsilon), rmse)) +
+  geom_line(aes(group = factor(q)), alpha = 0.2) +
+  geom_point(aes(color = factor(q)), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "RMSE for Income Histogram",
+    subtitle = "Selected Percentiles"
+  )
+
+```
+
+# Mean Income
+
+## No Noise
+
+We calculate the unweighted and weighted mean of income from salaries and wages.
+
+```{r}
+# unweighted mean
+true_mean_income <- mean(x = asec$INCWAGE)
+
+# unweight CI
+ci_length_original <- t.test(asec$INCWAGE)$conf.int[2] - t.test(asec$INCWAGE)$conf.int[1]
+
+```
+
+## Noisy Results
+
+This table summarizes the results across all methods for means. 
+
+```{r}
+mean_income_results <- read_csv(here::here("results", "03_cps_mean-income.csv"), guess_max = 4500)
+
+mean_income_results <- mean_income_results %>%
+  mutate(
+    noisy_mean = bias + true_mean_income,
+    relative_bias = bias / true_mean_income#,
+    #`Median Relative CI Length` = median(ci_length / ci_length_original)#,
+  )
+
+summary_mean_income_results <- mean_income_results %>%
+  group_by(method, epsilon, delta) %>%
+  summarize(
+    `Median Relative Bias` = median(relative_bias), 
+    RMSE = sqrt(mean(bias ^ 2)),
+    `Median CI Overlap` = median(ci_overlap, na.rm = TRUE),
+    `NAs in CI Overlap` = sum(is.na(ci_overlap)),
+  ) %>%
+  ungroup()
+
+summary_mean_income_results %>%
+  mutate(
+    `Median Relative Bias` = round(`Median Relative Bias`, digits = 3),
+    RMSE = round(RMSE, digits = 3),
+    `Median CI Overlap` = round(`Median CI Overlap`, digits = 3),
+    `NAs in CI Overlap` = round(`NAs in CI Overlap`, digits = 0)
+  ) %>%
+  datatable()
+
+```
+
+```{r}
+summary_mean_income_results %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(epsilon, `Median Relative Bias`)) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  labs(title = "Median Relative Bias for Mean Income")
+
+summary_mean_income_results %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(epsilon, `Median CI Overlap`)) +
+  geom_hline(yintercept = 1, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  labs(title = "CI Overlap for Mean Income")
+
+summary_mean_income_results %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001)) %>%
+  ggplot(aes(epsilon, RMSE)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  labs(title = "RMSE for Mean Income")
+
+```
+
+# Mean Earned Income
+
+## No Noise
+
+We calculate the unweighted and weighted mean of income from salaries and wages.
+
+```{r}
+# unweighted mean
+true_mean_earned_income <- mean(x = eitc$earned_income_2014)
+
+# unweighted CI
+ci_length_original_earned <- t.test(eitc$earned_income_2014)$conf.int[2] - t.test(eitc$earned_income_2014)$conf.int[1]
+
+```
+
+## Noisy Results
+
+This table summarizes the results across all methods for means. 
+
+```{r}
+mean_earned_income_results <- read_csv(here::here("results", "03_cps_mean-earned-income.csv"), guess_max = 10000)
+
+mean_earned_income_results <- mean_earned_income_results %>%
+  mutate(
+    noisy_mean = bias + true_mean_income,
+    relative_bias = bias / true_mean_income#,
+    #`Median Relative CI Length` = median(ci_length / ci_length_original)#,
+  )
+
+summary_mean_earned_income_results <- mean_earned_income_results %>%
+  group_by(method, epsilon, delta) %>%
+  summarize(
+    `Median Relative Bias` = median(relative_bias), 
+    RMSE = sqrt(mean(bias ^ 2)),
+    `Median CI Overlap` = median(ci_overlap, na.rm = TRUE),
+    `NAs in CI Overlap` = sum(is.na(ci_overlap)),
+  ) %>%
+  ungroup()
+
+summary_mean_income_results %>%
+  mutate(
+    `Median Relative Bias` = round(`Median Relative Bias`, digits = 3),
+    RMSE = round(RMSE, digits = 3),
+    `Median CI Overlap` = round(`Median CI Overlap`, digits = 3),
+    `NAs in CI Overlap` = round(`NAs in CI Overlap`, digits = 0)
+  ) %>%
+  datatable()
+
+```
+
+```{r}
+summary_mean_earned_income_results %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100) %>%
+  ggplot(aes(epsilon, `Median Relative Bias`)) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  labs(title = "Median Relative Bias for Mean Earned Income")
+
+summary_mean_earned_income_results %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100) %>%
+  ggplot(aes(epsilon, `Median CI Overlap`)) +
+  geom_hline(yintercept = 1, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  labs(title = "CI Overlap for Mean Earned Income")
+
+summary_mean_earned_income_results %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100) %>%
+  ggplot(aes(epsilon, RMSE)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  labs(title = "RMSE for Mean Earned Income")
+
+```
+
+# Quantiles
+
+## No Noise
+
+We calculate unweighted and weighted percentiles of income from salaries and wages.
+
+```{r}
+percentiles <- seq(from = 0.1, to = 0.9, by = 0.1)
+
+# unweighted percentiles
+true_quantile <- quantile(x = asec$INCWAGE, probs = percentiles)
+
+# weighted percentiles
+wtd.quantile(x = asec$INCWAGE, weights = asec$ASECWT, probs = percentiles)
+
+```
+
+## Noisy Results {.tabset}
+
+### With quantile_smooth
+
+```{r}
+quantile_results <- read_csv(here::here("results", "03_cps_quantiles.csv"))
+
+quantile_results <- quantile_results %>%
+  mutate(
+    relative_bias =  bias / mean(true_quantile)
+  )
+
+quantile_results_summary <- quantile_results %>%
+  group_by(method, epsilon, delta) %>%
+  summarize(
+    `Median bias` = median(bias),
+    `Median relative bias` = median(relative_bias),
+    RMSE = sqrt(mean(bias ^ 2))
+    ) %>%
+  ungroup()
+
+quantile_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100,
+         epsilon >= 0.1) %>%
+  ggplot(aes(epsilon, `Median relative bias`)) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +
+  labs(
+    title = "Median Relative Bias for Income Quantiles"
+  )
+
+quantile_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100,
+         epsilon >= 0.1) %>%
+  ggplot(aes(epsilon, `Median bias`)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +  
+  labs(
+    title = "Median Bias for Income Quantiles"
+  )
+
+quantile_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100,
+         epsilon >= 0.1) %>%
+  ggplot(aes(epsilon, RMSE)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method, scales = "free_y") +  
+  labs(
+    title = "RMSE for Income Quantiles"
+  )
+
+```
+
+### Without quantile_smooth
+
+```{r}
+quantile_results_summary <- quantile_results_summary %>%
+  filter(method != "quantile_smooth")
+
+quantile_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100,
+         epsilon >= 0.1) %>%
+  ggplot(aes(epsilon, `Median relative bias`)) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method) +
+  labs(
+    title = "Median Relative Bias for Income Quantiles"
+  )
+
+quantile_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100,
+         epsilon >= 0.1) %>%
+  ggplot(aes(epsilon, `Median bias`)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method) +  
+  labs(
+    title = "Median Bias for Income Quantiles"
+  )
+
+quantile_results_summary %>%
+  filter(epsilon > 0.01) %>%
+  filter(delta %in% c(NA, 0.000001),
+         epsilon < 100,
+         epsilon >= 0.1) %>%
+  ggplot(aes(epsilon, RMSE)) +
+  geom_hline(yintercept = 0, color = "red") +  
+  geom_line(aes(group = method), alpha = 0.2) +
+  geom_point(aes(color = method), alpha = 0.4) +
+  facet_wrap(~method) +  
+  labs(
+    title = "RMSE for Income Quantiles"
+  )
+
+```
+
+
