@@ -25,9 +25,9 @@ The iteration scripts write results and summaries of results to the `results/` f
 
 The results of those documents can be viewed here (for the version on the `master` branch):
 
-* [03 CPS Summary Statistics]()
-* [04 CPS Regression Analysis (Female)]()
-* [04 CPS Regression Analysis (Male)]()
+* [03 CPS Summary Statistics](https://urbaninstitute.github.io/formal-privacy-comp-appendix/analyses/03_cps-summary-stats)
+* [04 CPS Regression Analysis (Female)](https://urbaninstitute.github.io/formal-privacy-comp-appendix/analyses/04_cps_female-regression)
+* [04 CPS Regression Analysis (Male)](https://urbaninstitute.github.io/formal-privacy-comp-appendix/analyses/04_cps_male-regression)
 
 Most of the methods have wrapper functions like `lm_*` and `quantile_*` in `R/`. The wrapper functions provide a consistent interface around methods with varying styles in R and Python. These methods are in `dp-code/`. 
 
