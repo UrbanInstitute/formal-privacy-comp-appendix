@@ -12,7 +12,7 @@ This repository contains code and data for a feasibility study of formally priva
 
 ## Background
 
-This repository contains code and data for A Feasibility Study of Differentially Private Summary Statistics and Regression Analyses with Evaluations on Administrative and Survey Data ([JASA]([https://arxiv.org/abs/2110.12055](https://www.tandfonline.com/doi/full/10.1080/01621459.2023.2270795))). The paper evaluates the results of several differentially private methods for a range of statistics on two case studies. 
+This repository contains code and data for A Feasibility Study of Differentially Private Summary Statistics and Regression Analyses with Evaluations on Administrative and Survey Data ([JASA](https://arxiv.org/abs/2110.12055](https://www.tandfonline.com/doi/full/10.1080/01621459.2023.2270795))). The paper evaluates the results of several differentially private methods for a range of statistics on two case studies. 
 
 One case study uses confidential tax microdata that is not available for reproduction. The second case study uses public microdata from the 1994 to 1996 Current Population Survey Annual Social and Economic Supplements (CPS ASEC). 
 
